@@ -7,4 +7,9 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
 
+  <ItemGroup>
+    <Folder Include="Documentation\" />
+	  <PackageReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
 </Project>
