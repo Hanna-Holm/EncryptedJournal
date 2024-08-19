@@ -1,6 +1,10 @@
 ﻿using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.Cryptography.KeyDerivation;
 using System.IO;
 using System.Text.Json;
+using System.Drawing;
+using System.Security.Cryptography;
+using System.Collections.Generic;
 
 namespace EncryptedJournal
 {
@@ -12,7 +16,9 @@ namespace EncryptedJournal
         private bool hasAccount;
         public string username { get; private set; }
         private string dbPath = "db.json";
+        private byte[] key;
         private bool isLoggedIn = false;
+        private PasswordHasher<string> hasher = new PasswordHasher<string>();
 
         public JournalApp()
         {
@@ -60,16 +66,15 @@ namespace EncryptedJournal
             Console.Write("Password: ");
             string pw = GetUserInput();
 
-            var hasher = new PasswordHasher<string>();
             string hashedPw = hasher.HashPassword(username, pw);
 
             if (hasAccount)
             {
-                Login(pw, hasher);
+                Login(pw);
             }
             else
             {
-                CreateAccount(hashedPw);
+                CreateAccount(pw, hashedPw);
             }
         }
         private string GetUserInput()
@@ -93,29 +98,99 @@ namespace EncryptedJournal
             return null;
         }
 
-        private void Login(string pw, PasswordHasher<string> hasher)
+        private void Login(string pw)
         {
-            // Retrieve stored pw
-            string fileAsText = File.ReadAllText(dbPath);
-            Dictionary<string, string> KeyValuePairs = JsonSerializer.Deserialize<Dictionary<string, string>>(fileAsText);
-            string storedPw = KeyValuePairs["password"];
-
-            PasswordVerificationResult result = hasher.VerifyHashedPassword(username, storedPw, pw);
-            Console.WriteLine(result);
+            string storedPw = GetValueFromKey("password");
+            string storedSaltAsText = GetValueFromKey("salt");
+            byte[] salt = Convert.FromBase64String(storedSaltAsText);
+            if (TryAuthenticate(pw, storedPw))
+            {
+                isLoggedIn = true;
+                DeriveKey(pw, salt);
+                string journal = DecryptJournal();
+            }
         }
 
-        private void CreateAccount(string hashedPw)
+        private void DeriveKey(string pw, byte[] salt)
         {
+            key = KeyDerivation.Pbkdf2(pw, salt, KeyDerivationPrf.HMACSHA256, 100000, 32);
+        }
+        
+        private string DecryptJournal()
+        {
+            throw new NotImplementedException();
+        }
+
+        private string GetValueFromKey(string key)
+        {
+            string fileAsText = File.ReadAllText(dbPath);
+            Dictionary<string, string> KeyValuePairs = JsonSerializer.Deserialize<Dictionary<string, string>>(fileAsText);
+            return KeyValuePairs[key];
+        }
+
+        private bool TryAuthenticate(string pw, string storedPw)
+        {
+            return hasher.VerifyHashedPassword(username, storedPw, pw) == PasswordVerificationResult.Success ? true : false;
+        }
+
+        private void CreateAccount(string pw, string hashedPw)
+        {
+            byte[] salt = GenerateSalt();
+            
+            string journalText = "";
+
+            EncryptAndSaveToFile(pw, hashedPw, salt, journalText);
+        }
+
+        private void EncryptAndSaveToFile(string password, string hashedPw, byte[] salt, string textToEncrypt)
+        {
+            key = KeyDerivation.Pbkdf2(password, salt, KeyDerivationPrf.HMACSHA256, 100000, 32);
+            byte[] encryptedJournal = EncryptText(key, textToEncrypt);
+            string encryptedJournalAsText = Convert.ToBase64String(encryptedJournal);
+            string saltString = Convert.ToBase64String(salt);
+
             var keyValuePair = new Dictionary<string, string>
             {
                 { "username", username },
                 { "password", hashedPw },
-                { "journal", "" }
+                { "salt", saltString },
+                { "journal", encryptedJournalAsText }
             };
 
-            string keyValue = JsonSerializer.Serialize(keyValuePair);
-            File.WriteAllText(dbPath, keyValue);
+            string dbAsText = JsonSerializer.Serialize(keyValuePair);
+            File.WriteAllText(dbPath, dbAsText);
         }
 
+        private byte[] GenerateSalt()
+        {
+            byte[] salt = new byte[16];
+            using (var rng = RandomNumberGenerator.Create())
+            {
+                rng.GetBytes(salt);
+            }
+            return salt;
+        }
+
+        private byte[] EncryptText(byte[] key, string plainText)
+        {
+            using (Aes aes = Aes.Create())
+            {
+                aes.Key = key;
+                aes.GenerateIV();
+
+                using (MemoryStream ms = new MemoryStream())
+                {
+                    ms.Write(aes.IV, 0, aes.IV.Length);
+
+                    using (CryptoStream cs = new CryptoStream(ms, aes.CreateEncryptor(), CryptoStreamMode.Write))
+                    using (StreamWriter sw = new StreamWriter(cs))
+                    {
+                        sw.Write(plainText);
+                    }
+
+                    return ms.ToArray();
+                }
+            }
+        }
     }
 }
